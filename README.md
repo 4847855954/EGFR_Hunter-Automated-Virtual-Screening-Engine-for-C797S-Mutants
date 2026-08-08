@@ -9,7 +9,7 @@ EGFR_Hunter 是一套專為對抗 EGFR C797S 耐藥突變設計的開源 CADD/AI
 
 /In-Browser 3D Viewer: 整合 py3Dmol，免安裝桌面版 PyMOL 即可查看分子打靶姿勢。  
 
-#[目前基礎：v1.0 乾實驗引擎]
+# [目前基礎：v1.0 乾實驗引擎]
        │
        ├─── 1. 動態物理模擬 (MD & MM/PBSA) ───> 補足靜態對接的假陽性
        ├─── 2. 生成式 AI (De Novo Design) ───> 擺脫已知分子庫限制
