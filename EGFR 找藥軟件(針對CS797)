@@ -1,0 +1,184 @@
+# ==========================================
+# [區塊 1] 環境建置與資料預載 (請在獨立 Cell 執行)
+# ==========================================
+print("📦 1. 安裝 Python 第三方生醫與 AI 套件...")
+!pip install rdkit xgboost py3Dmol -q
+
+print("📦 2. 安裝 Linux 底層物理對接系統引擎...")
+!apt-get update -qq && apt-get install -y openbabel autodock-vina -qq
+
+print("🧬 3. 下載並預處理 C797S 蛋白質 3D 受體口袋...")
+!wget -q https://files.rcsb.org/download/6LUD.pdb -O egfr_c797s_raw.pdb
+!obabel egfr_c797s_raw.pdb -O egfr_c797s.pdbqt -xr > /dev/null 2>&1
+
+print("✅ 所有環境與基礎設施已建置完畢！(請確認你已上傳 egfr_ml_dataset.npz)")
+
+# ==========================================
+# [區塊 2] 核心引擎模組 (請在獨立 Cell 執行)
+# ==========================================
+import os
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from rdkit import Chem
+from rdkit.Chem import AllChem, Descriptors, Lipinski, rdFingerprintGenerator
+import py3Dmol
+from IPython.display import display
+
+class EGFR_Hunter:
+    """
+    EGFR 虛擬篩選自動化引擎 (純淨版)
+    """
+    def __init__(self, dataset_path="egfr_ml_dataset.npz", target_name="egfr_c797s"):
+        self.dataset_path = dataset_path
+        self.receptor_pdbqt = f"{target_name}.pdbqt"
+        self.best_model = None
+        self.mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+        
+        print("🚀 啟動 EGFR_Hunter 引擎...")
+        
+        # 嚴格防呆：確保第一區塊有確實跑完
+        if not os.path.exists(self.receptor_pdbqt):
+            raise FileNotFoundError(f"❌ 找不到受體檔案 {self.receptor_pdbqt}！請確保已執行 [區塊 1] 環境建置。")
+            
+        self._load_ai_model()
+        print("✅ 引擎準備就緒！")
+
+    def _load_ai_model(self):
+        """讀取特徵集並訓練 XGBoost 模型"""
+        print("   🧠 載入數據並喚醒 XGBoost AI 模型...")
+        if os.path.exists(self.dataset_path):
+            data = np.load(self.dataset_path)
+            self.best_model = xgb.XGBRegressor(
+                n_estimators=150, max_depth=7, learning_rate=0.1, random_state=42, n_jobs=-1
+            )
+            self.best_model.fit(data["X_all"], data["y"])
+        else:
+            raise FileNotFoundError(f"❌ 找不到 {self.dataset_path}！請手動上傳該檔案至 Colab。")
+
+    def _extract_features(self, smiles):
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None: return None
+        fp = self.mfpgen.GetFingerprintAsNumPy(mol)
+        desc = [
+            Descriptors.MolWt(mol), Descriptors.MolLogP(mol), Lipinski.NumHDonors(mol),
+            Lipinski.NumHAcceptors(mol), Descriptors.TPSA(mol), Descriptors.NumRotatableBonds(mol)
+        ]
+        return np.hstack([fp, desc])
+
+    def run_virtual_screening(self, compounds_dict, top_k=2):
+        print(f"\n🔍 開始分析 {len(compounds_dict)} 個候選分子...")
+        
+        # --- 階段 1: 2D AI 預測 ---
+        valid_names, features, valid_smiles = [], [], []
+        for name, smiles in compounds_dict.items():
+            feat = self._extract_features(smiles)
+            if feat is not None:
+                features.append(feat)
+                valid_names.append(name)
+                valid_smiles.append(smiles)
+
+        predicted_pIC50 = self.best_model.predict(np.array(features))
+        df = pd.DataFrame({
+            "Compound_ID": valid_names,
+            "SMILES": valid_smiles,
+            "Predicted_pIC50": predicted_pIC50
+        }).sort_values(by="Predicted_pIC50", ascending=False)
+        
+        top_hits = df.head(top_k).copy()
+        print(f"✅ 第一階段 AI 粗篩完成，已鎖定前 {top_k} 名高分分子。")
+
+        # --- 階段 2: 3D 分子對接 ---
+        print("⚙️ 開始進行 C797S 口袋 3D 物理對接...")
+        docking_results = []
+        for _, row in top_hits.iterrows():
+            cid, smiles = row["Compound_ID"], row["SMILES"]
+            print(f"   ➤ 正在對接: {cid}...")
+            
+            mol = Chem.MolFromSmiles(smiles)
+            Chem.SanitizeMol(mol)
+            mol = Chem.AddHs(mol)
+            
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 42
+            res = AllChem.EmbedMolecule(mol, params)
+            if res != 0:
+                params.useRandomCoords = True
+                res = AllChem.EmbedMolecule(mol, params)
+            if res == 0: AllChem.MMFFOptimizeMolecule(mol)
+            
+            temp_pdb, out_pdbqt, log_file = f"{cid}.pdb", f"{cid}.pdbqt", f"log_{cid}.txt"
+            Chem.MolToPDBFile(mol, temp_pdb)
+            os.system(f"obabel {temp_pdb} -O {out_pdbqt} -p 7.4 > /dev/null 2>&1")
+            
+            affinity = None
+            if os.path.exists(out_pdbqt):
+                os.system(f"vina --receptor {self.receptor_pdbqt} --ligand {out_pdbqt} "
+                          f"--center_x 21.8 --center_y 51.5 --center_z 30.2 "
+                          f"--size_x 20 --size_y 20 --size_z 20 "
+                          f"--out docked_{cid}.pdbqt --exhaustiveness 8 > {log_file}")
+                
+                if os.path.exists(log_file):
+                    with open(log_file, "r") as f:
+                        for line in f:
+                            if line.strip().startswith("1"):
+                                affinity = float(line.split()[1])
+                                break
+            docking_results.append(affinity)
+            
+            # 清理分子級別的暫存檔
+            for f_name in [temp_pdb, out_pdbqt, log_file]:
+                if os.path.exists(f_name): os.remove(f_name)
+
+        top_hits["Docking_ΔG"] = docking_results
+        print("🎉 高通量篩選流水線執行完畢！\n")
+        return top_hits
+
+    def visualize_pose(self, compound_id):
+        docked_file = f"docked_{compound_id}.pdbqt"
+        if not os.path.exists(docked_file) or not os.path.exists(self.receptor_pdbqt):
+            print(f"❌ 找不到 {compound_id} 的對接結構檔。")
+            return
+            
+        with open(self.receptor_pdbqt, "r") as f: rec_data = f.read()
+        with open(docked_file, "r") as f: lig_data = f.read()
+            
+        view = py3Dmol.view(width=800, height=500)
+        view.addModel(rec_data, "pdbqt")
+        view.setStyle({'model': 0}, {'cartoon': {'color': 'lightgray'}})
+        view.addModel(lig_data, "pdbqt")
+        view.setStyle({'model': 1}, {'stick': {'colorscheme': 'cyanCarbon'}})
+        view.zoomTo({'model': 1})
+        return view.show()
+
+
+# ==========================================
+# [測試執行區]
+# ==========================================
+if __name__ == "__main__":
+    hunter = EGFR_Hunter()
+    my_test_compounds = {
+        "Hit_Alpha": "CCOc1cc2c(cc1OC)c(nc(n2)Nc3ccc(cc3)N4CCNCC4)Nc5cccc(c5)C#C",
+        "Hit_Beta": "CN1CCN(c2ccc(Nc3nc(Nc4cccc(S(=O)(=O)C)c4)nc5ccccc35)cc2)CC1"
+    }
+    report = hunter.run_virtual_screening(my_test_compounds, top_k=2)
+    display(report)
+
+
+# 1. 啟動引擎
+hunter = EGFR_Hunter()
+
+# 2. 準備你要測試的未知分子庫
+my_compounds = {
+    "Novel_C797S_Hit_1": "CCOc1cc2c(cc1OC)c(nc(n2)Nc3ccc(cc3)N4CCNCC4)Nc5cccc(c5)C#C",
+    "Novel_C797S_Hit_2": "CN1CCN(c2ccc(Nc3nc(Nc4cccc(S(=O)(=O)C)c4)nc5ccccc35)cc2)CC1"
+}
+
+# 3. 一鍵執行虛擬篩選 (指定只挑選 AI 預測最棒的前 2 名去跑 3D 對接)
+final_report = hunter.run_virtual_screening(my_compounds, top_k=2)
+
+# 顯示最終成果報表
+display(final_report)
+
+# 4. 直接在網頁裡查看 3D 結構
+hunter.visualize_pose("Novel_C797S_Hit_1")
