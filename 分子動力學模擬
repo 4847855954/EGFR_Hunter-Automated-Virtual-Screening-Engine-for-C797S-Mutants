@@ -1,0 +1,8 @@
+# 分子動力學
+啟動程式: 
+conda activate egfr_env
+mamba install -y -c conda-forge mdtraj
+mamba install -y -c conda-forge ambertools
+mamba install -y -c conda-forge openff-toolkit openmmforcefields
+mkdir ~/EGFR_Project
+cd ~/EGFR_Project
